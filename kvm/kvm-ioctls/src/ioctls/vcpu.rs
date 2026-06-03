@@ -1258,6 +1258,102 @@ impl VcpuFd {
         Ok(())
     }
 
+    /// Issues platform-specific memory encryption commands to manage vCPUs in
+    /// encrypted VMs.
+    ///
+    /// Note that some TDX commands work on the VM and not the vCPU, in which
+    /// case you must use [`VmFd::encrypt_op_tdx()`](super::vm::VmFd::encrypt_op_tdx)
+    /// instead.
+    ///
+    /// See the [KVM TDX documentation](https://docs.kernel.org/virt/kvm/x86/intel-tdx.html)
+    /// for more details.
+    ///
+    /// # Safety
+    ///
+    /// [`kvm_tdx_cmd::data`] in `op` may capture borrows which the compiler
+    /// may not be able to follow, e.g.
+    ///
+    /// ```no_run
+    /// use kvm_bindings::{KVM_X86_TDX_VM, kvm_cpuid2, kvm_tdx_cmd, kvm_tdx_cmd_id_KVM_TDX_GET_CPUID};
+    /// # use kvm_ioctls::{Kvm, Cap};
+    /// #
+    /// # let kvm = Kvm::new().unwrap();
+    /// # let vm = kvm.create_vm_with_type(KVM_X86_TDX_VM as u64).unwrap();
+    /// # let vcpu = vm.create_vcpu(0).unwrap();
+    ///
+    /// let cpuid = kvm_cpuid2::default();
+    /// let cpuid_ref = &cpuid;
+    ///
+    /// let mut cmd = kvm_tdx_cmd {
+    ///     id: kvm_tdx_cmd_id_KVM_TDX_GET_CPUID,
+    ///     flags: 0,
+    ///     data: std::ptr::from_ref(cpuid_ref) as u64,
+    ///     ..Default::default()
+    /// };
+    /// // UB: This alters cpuid while a borrow is alive!
+    /// unsafe { vcpu.encrypt_op_tdx(&mut cmd).unwrap() };
+    /// dbg!(cpuid_ref);
+    /// ```
+    ///
+    /// The caller must make sure to not break Rust's borrowing and aliasing rules.
+    ///
+    /// # Example
+    /// ```rust
+    /// # extern crate kvm_ioctls;
+    /// # extern crate kvm_bindings;
+    /// use kvm_bindings::TdxInitVm;
+    /// use kvm_bindings::bindings::{
+    ///     KVM_X86_TDX_VM, kvm_cpuid_entry2, kvm_tdx_cmd, kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
+    ///     kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+    /// };
+    /// # use kvm_ioctls::{Kvm, Cap};
+    ///
+    /// let kvm = Kvm::new().unwrap();
+    ///
+    /// // Check that TDX is supported and create the VM
+    /// let vmtypes = kvm.check_extension_int(Cap::VmTypes);
+    /// if vmtypes & (1 << KVM_X86_TDX_VM) == 0 {
+    ///     return;
+    /// }
+    /// let vm = kvm.create_vm_with_type(KVM_X86_TDX_VM as u64).unwrap();
+    ///
+    /// // Initialize the TDX VM. Set CPUID 0x80000008 EAX[23:16] to present a
+    /// // guest physical address size of 48 bits.
+    /// let mut init_vm = TdxInitVm::from_entries(&[kvm_cpuid_entry2 {
+    ///     function: 0x8000_0008,
+    ///     eax: 48 << 16,
+    ///     ..Default::default()
+    /// }])
+    /// .unwrap();
+    /// let mut cmd = kvm_tdx_cmd {
+    ///     id: kvm_tdx_cmd_id_KVM_TDX_INIT_VM,
+    ///     data: init_vm.as_mut_fam_struct_ptr() as u64,
+    ///     ..Default::default()
+    /// };
+    /// // SAFETY: we never use `init_vm` again
+    /// unsafe { vm.encrypt_op_tdx(&mut cmd).unwrap() };
+    ///
+    /// // Initialize the vCPU. `data` is the initial value of guest RCX.
+    /// let vcpu = vm.create_vcpu(0).unwrap();
+    /// let mut cmd = kvm_tdx_cmd {
+    ///     id: kvm_tdx_cmd_id_KVM_TDX_INIT_VCPU,
+    ///     data: 0,
+    ///     ..Default::default()
+    /// };
+    /// // SAFETY: `data` is 0
+    /// unsafe { vcpu.encrypt_op_tdx(&mut cmd).unwrap() };
+    /// ```
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn encrypt_op_tdx(&self, op: &mut kvm_tdx_cmd) -> Result<()> {
+        // SAFETY: we trust the kernel and verified parameters
+        let ret = unsafe { ioctl_with_mut_ptr(self, KVM_MEMORY_ENCRYPT_OP(), op) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(errno::Error::last())
+        }
+    }
+
     /// Sets the type of CPU to be exposed to the guest and optional features.
     ///
     /// This initializes an ARM vCPU to the specified type with the specified features
