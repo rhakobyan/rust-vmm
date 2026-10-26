@@ -5,6 +5,7 @@
 ### Added
 
 - [[#198]](https://github.com/rust-vmm/rust-vmm/pull/198) Add TDX support.
+- Add the aarch64 `Cap::ArmEl2` capability.
 
 ## v0.25.1
 
